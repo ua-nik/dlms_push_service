@@ -1,0 +1,7 @@
+from django.apps import AppConfig
+
+
+class MetersConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.meters'
+    verbose_name = 'Лічильники та DLMS-повідомлення'

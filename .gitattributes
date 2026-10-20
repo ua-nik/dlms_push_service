@@ -1,0 +1,5 @@
+# Shell-скрипти в Docker і Linux потребують завершення рядків LF, також на Windows.
+*.sh text eol=lf
+Dockerfile text eol=lf
+/.gitlab-ci.yml export-ignore
+/.gitlab/ export-ignore

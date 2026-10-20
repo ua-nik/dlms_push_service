@@ -1,0 +1,134 @@
+services:
+  # ----------------------------------------------------------------------------
+  # 1. PostgreSQL - Постійне сховище даних
+  # Порт назовні НЕ публікується (доступ лише всередині внутрішньої мережі Docker)
+  # ----------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: dlms_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-dlms_push_db}
+      POSTGRES_USER: ${DB_USER:-dlms_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dlms_secure_password_replace_me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - dlms_internal_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-dlms_user} -d ${DB_NAME:-dlms_push_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # 2. Redis - In-memory брокер повідомлень для Django Channels (WebSocket)
+  # Порт назовні НЕ публікується
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: dlms_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - dlms_internal_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # 3. REST API та WebSocket (ASGI сервер Daphne)
+  # Перезапуск API НЕ впливає на процес прийому UDP!
+  # ----------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dlms_api
+    restart: unless-stopped
+    command: ["api"]
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis
+      - API_PORT=8000
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - staticfiles:/app/staticfiles
+    networks:
+      - dlms_internal_net
+    ports:
+      - "${API_HOST_PORT:-8001}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 4. UDP-приймач DLMS Push
+  # Слухає UDP_RECEIVER_PORT, типово 4059/udp
+  # ----------------------------------------------------------------------------
+  udp_receiver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dlms_udp_receiver
+    restart: unless-stopped
+    command: ["udp_receiver"]
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis
+    ports:
+      - "${UDP_RECEIVER_PORT:-4059}:${UDP_RECEIVER_PORT:-4059}/udp"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - dlms_internal_net
+
+  # ----------------------------------------------------------------------------
+  # 5. Nginx - Необов’язковий HTTP/WebSocket-проксі за зовнішнім TLS-проксі
+  # ----------------------------------------------------------------------------
+  nginx:
+    profiles: ["https"]
+    image: nginx:alpine
+    container_name: dlms_nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - staticfiles:/app/staticfiles:ro
+    depends_on:
+      - api
+    networks:
+      - dlms_internal_net
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  staticfiles:
+    driver: local
+
+networks:
+  dlms_internal_net:
+    driver: bridge
